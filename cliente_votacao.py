@@ -4,8 +4,8 @@ Terminal de VOTAÇÃO REMOTA SEGURA.
 
 Fluxo:
   1. Pede desafio ao servidor (anti-replay)
-  2. Autentica CPF + desafio → token de sessão (5 min, 1 voto)
-  3. Envia voto com token + nonce único
+  2. Autentica CPF + desafio → token de sessão
+  3. Vota UMA vez em cada cargo, cada requisição com nonce próprio
 
 Uso:
   python3 cliente_votacao.py --servidor 192.168.1.10
@@ -48,6 +48,71 @@ def api(base: str, metodo: str, path: str, dados: dict | None = None) -> dict:
         return {"ok": False, "erro": f"Falha de conexão: {e}"}
 
 
+def votar_em_cargo(base: str, eid: int, eleitor: dict, token: str,
+                   cargo: str, candidatos: list[dict]) -> dict:
+    """Conduz a escolha e o envio do voto de um único cargo."""
+    do_cargo = [c for c in candidatos if c["cargo"] == cargo]
+
+    while True:
+        print(f"\n  ══ CARGO: {cargo.upper()} ══\n")
+        for c in do_cargo:
+            print(f"  Nº {c['numero']:02d} — {c['nome']}")
+            if c.get("descricao"):
+                print(f"           {c['descricao']}")
+        print("\n  Digite o número, BRANCO, NULO — ou 0 para cancelar a votação")
+        escolha = input("  Voto: ").strip().upper()
+
+        if escolha == "0":
+            return {"cancelado": True}
+
+        tipo, numero = None, None
+        if escolha == "BRANCO":
+            tipo = "branco"
+        elif escolha == "NULO":
+            tipo = "nulo"
+        else:
+            try:
+                numero = int(escolha)
+            except ValueError:
+                print("  ✗ Entrada inválida.")
+                continue
+            if not any(c["numero"] == numero for c in do_cargo):
+                print(f"  ✗ O número {numero} não é candidato a {cargo}.")
+                continue
+            tipo = "candidato"
+
+        # Confirmação
+        if tipo == "candidato":
+            cand = next(c for c in do_cargo if c["numero"] == numero)
+            print(f"\n  ┌──────────────────────────────────────┐")
+            print(f"  │ Nº {cand['numero']:02d}  {cand['nome'][:28]:<28}│")
+            print(f"  │ {cargo[:36]:<36} │")
+            print(f"  └──────────────────────────────────────┘")
+        else:
+            print(f"\n  >>> VOTO {tipo.upper()} para {cargo} <<<")
+
+        if input("\n  Confirma? [1] SIM [2] corrigir: ").strip() != "1":
+            continue
+
+        payload = {
+            "eleicao_id": eid,
+            "eleitor_id": eleitor["id"],
+            "token": token,
+            "nonce": secrets.token_hex(16),
+            "cargo": cargo,
+            "tipo_voto": tipo,
+        }
+        if tipo == "candidato":
+            payload["numero_candidato"] = numero
+
+        resp = api(base, "POST", "/api/remoto/votar", payload)
+        if resp.get("ok"):
+            return resp
+        print(f"\n  ✗ {resp.get('erro')}")
+        if input("  Tentar novamente neste cargo? [1] SIM [2] NÃO: ").strip() != "1":
+            return {"erro": resp.get("erro")}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Votação Remota Segura — Urna Eletrônica")
     parser.add_argument("--servidor", default="127.0.0.1", help="IP do servidor")
@@ -67,7 +132,7 @@ def main():
         print("""
 ╔══════════════════════════════════════════════════════════════╗
 ║     VOTAÇÃO REMOTA SEGURA                                    ║
-║     Desafio → Sessão HMAC → Voto + Nonce                     ║
+║     Desafio → Sessão HMAC → Um voto por cargo + Nonce        ║
 ╚══════════════════════════════════════════════════════════════╝
 """)
         print(f"  Servidor: {base}\n")
@@ -116,77 +181,57 @@ def main():
         })
         if not auth.get("ok"):
             print(f"\n  ✗ {auth.get('erro')}")
+            if auth.get("cargos_votados"):
+                print(f"    Cargos já votados: {', '.join(auth['cargos_votados'])}")
             pausar()
             continue
 
         eleitor = auth["eleitor"]
-        sessao = auth["sessao"]
-        token = sessao["token"]
+        token = auth["sessao"]["token"]
+        pendentes = auth.get("cargos_pendentes") or []
+
         print(f"\n  ✓ {eleitor['nome']} autenticado")
-        print(f"  Sessão segura: {sessao['ttl']}s para concluir o voto")
+        if auth.get("cargos_votados"):
+            print(f"  Já votou em: {', '.join(auth['cargos_votados'])}")
+        print(f"  Cargos a votar agora: {', '.join(pendentes)}")
+        print(f"  Sessão segura: {auth['sessao']['ttl']}s")
 
         resp_c = api(base, "GET", f"/api/eleicoes/{eid}/candidatos")
         candidatos = (resp_c.get("candidatos") or []) if resp_c.get("ok") else []
 
-        while True:
-            print("\n  ── CANDIDATOS ──\n")
-            cargo_atual = None
-            for c in candidatos:
-                if c["cargo"] != cargo_atual:
-                    cargo_atual = c["cargo"]
-                    print(f"  ── {cargo_atual} ──")
-                print(f"  Nº {c['numero']:02d} — {c['nome']}")
-
-            print("\n  Número, BRANCO, NULO ou 0 para cancelar")
-            escolha = input("  Voto: ").strip().upper()
-            if escolha == "0":
+        recibos = []
+        cancelado = False
+        for cargo in pendentes:
+            r = votar_em_cargo(base, eid, eleitor, token, cargo, candidatos)
+            if r.get("cancelado"):
+                cancelado = True
                 break
+            if not r.get("ok"):
+                break
+            recibos.append((cargo, r.get("compromisso")))
+            print(f"\n  ✓ Voto para {cargo} registrado.")
 
-            tipo = numero = None
-            if escolha == "BRANCO":
-                tipo = "branco"
-            elif escolha == "NULO":
-                tipo = "nulo"
-            else:
-                try:
-                    numero = int(escolha)
-                    tipo = "candidato"
-                except ValueError:
-                    print("  Inválido.")
-                    continue
-
-            conf = input("  Confirma? [1] SIM [2] NÃO: ").strip()
-            if conf != "1":
-                continue
-
-            nonce = secrets.token_hex(16)
-            payload = {
-                "eleicao_id": eid,
-                "eleitor_id": eleitor["id"],
-                "token": token,
-                "nonce": nonce,
-                "tipo_voto": tipo,
-                "cpf": cpf,
-            }
-            if tipo == "candidato":
-                payload["numero_candidato"] = numero
-
-            resp_v = api(base, "POST", "/api/remoto/votar", payload)
-            if resp_v.get("ok"):
-                limpar()
-                print("""
-  ╔══════════════════════════════════════════╗
-  ║   VOTO REMOTO REGISTRADO COM SUCESSO     ║
-  ╚══════════════════════════════════════════╝
+        limpar()
+        if cancelado and not recibos:
+            print("\n  Votação cancelada. Nenhum voto foi registrado.")
+        elif recibos:
+            print("""
+  ╔══════════════════════════════════════════════╗
+  ║       VOTO(S) REGISTRADO(S) COM SUCESSO      ║
+  ╚══════════════════════════════════════════════╝
 """)
-                if resp_v.get("compromisso"):
-                    print("  Recibo (compromisso) — guarde:")
-                    print(f"\n  {resp_v['compromisso']}\n")
-                print("  A sessão foi consumida (não reutilizável).")
+            print("  Recibos (compromissos) — guarde para conferência:\n")
+            for cargo, comp in recibos:
+                print(f"  {cargo}:")
+                print(f"    {comp}\n")
+            faltam = [c for c in pendentes if c not in [r[0] for r in recibos]]
+            if faltam:
+                print(f"  ⚠ Ainda faltam os cargos: {', '.join(faltam)}")
             else:
-                print(f"\n  ✗ {resp_v.get('erro')}")
-            pausar()
-            break
+                print("  Todos os cargos foram votados. Sessão encerrada.")
+            print("\n  Confira seu recibo no quadro público com a opção do")
+            print("  terminal de relatórios ou em /api/recibo/verificar.")
+        pausar()
 
 
 if __name__ == "__main__":

@@ -5,26 +5,35 @@
 ║     Para Condomínios • Associações • Sindicatos              ║
 ╚══════════════════════════════════════════════════════════════╝
 
-Versão: 2.0 — Mais fácil de usar
+Versão: 4.0 — voto por cargo, registro atômico e administração completa
 """
 
+import getpass
 import os
 import sys
+from datetime import datetime
+
 from database import (
     inicializar_banco, verificar_admin, alterar_senha_admin,
-    fazer_backup, listar_backups, inspecionar_banco, DB_PATH,
+    fazer_backup, listar_backups, restaurar_backup, inspecionar_banco, DB_PATH,
     consultar_auditoria, listar_acoes_auditoria, auditoria_consistencia_votos,
-    exportar_auditoria_csv,
+    exportar_auditoria_csv, criar_admin, listar_admins, desativar_admin,
+    redefinir_senha_admin,
 )
 from eleicao import (
+    ErroApuracao,
     criar_eleicao, listar_eleicoes, obter_eleicao, alterar_status_eleicao,
+    atualizar_eleicao, excluir_eleicao,
     cadastrar_candidato, listar_candidatos, obter_candidato_por_numero,
-    cadastrar_eleitor, listar_eleitores, autenticar_eleitor, marcar_como_votou,
+    obter_candidato, atualizar_candidato, excluir_candidato,
+    cadastrar_eleitor, listar_eleitores, autenticar_eleitor, obter_eleitor,
+    atualizar_eleitor, excluir_eleitor, importar_eleitores_csv, modelo_csv_eleitores,
     registrar_voto, obter_resultados, criar_eleicao_demonstracao,
     exportar_resultados_csv, exportar_resultados_pdf, listar_cargos,
     relatorio_votos, exportar_relatorio_votos_csv, formatar_cpf,
     obter_recibo_voto, quadro_compromissos, verificar_votos_zk,
-    verificar_provas_or, obter_resultados_homo,
+    verificar_provas_or, obter_resultados_homo, verificar_recibo,
+    exportar_quadro_compromissos,
 )
 
 
@@ -54,6 +63,21 @@ def aviso(msg: str):
     print(f"\n  ⚠ {msg}")
 
 
+def perguntar_sim(pergunta: str) -> bool:
+    return input(f"  {pergunta} (s/N): ").strip().lower() == "s"
+
+
+def ler_int(prompt: str, padrao: int | None = None) -> int | None:
+    txt = input(prompt).strip()
+    if not txt:
+        return padrao
+    try:
+        return int(txt)
+    except ValueError:
+        erro("Número inválido.")
+        return None
+
+
 # ==================== MENU PRINCIPAL ====================
 
 def menu_principal():
@@ -62,15 +86,16 @@ def menu_principal():
         print("""
 ╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
-║              URNA ELETRÔNICA  v2.0                           ║
+║              URNA ELETRÔNICA  v4.0                           ║
 ║     Condomínios • Associações • Sindicatos                   ║
 ║                                                              ║
-║         Sistema fácil, seguro e transparente                 ║
+║         Um voto por cargo, sigiloso e verificável            ║
 ╚══════════════════════════════════════════════════════════════╝
 
   [1] Área do Administrador
   [2] Área de Votação (Eleitor)
   [3] Criar Eleição de Demonstração (para testar)
+  [4] Conferir meu recibo de voto
   [0] Sair
 """)
         opcao = input("  Escolha uma opção: ").strip()
@@ -81,6 +106,8 @@ def menu_principal():
             area_votacao()
         elif opcao == "3":
             criar_demo()
+        elif opcao == "4":
+            menu_conferir_recibo()
         elif opcao == "0":
             limpar_tela()
             print("\n  Obrigado por usar a Urna Eletrônica!\n")
@@ -97,17 +124,16 @@ def criar_demo():
   Isso cria automaticamente:
 
   • 1 eleição de condomínio com voto ponderado
-  • 4 candidatos (Síndico e Conselheiro)
+  • 4 candidatos em 2 cargos (Síndico e Conselheiro)
   • 6 eleitores (identificação pelo CPF)
+
+  Cada eleitor vota UMA vez em CADA cargo.
 
   CPFs válidos (algoritmo oficial) dos eleitores de demonstração:
     123.456.789-09  |  234.567.890-92  |  345.678.901-75
     456.789.012-49  |  567.890.123-03  |  678.901.234-69
-
-  Na votação, o eleitor se identifica digitando o CPF.
 """)
-    conf = input("  Confirma criação? (s/N): ").strip().lower()
-    if conf != "s":
+    if not perguntar_sim("Confirma criação?"):
         return
     try:
         eid = criar_eleicao_demonstracao()
@@ -119,22 +145,76 @@ def criar_demo():
     pausar()
 
 
+def menu_conferir_recibo():
+    """Qualquer eleitor pode conferir se o voto dele entrou no quadro público."""
+    limpar_tela()
+    titulo("CONFERIR RECIBO DE VOTO")
+    print("""
+  Ao votar você recebeu um código (compromisso) por cargo.
+  Aqui você confere se ele consta no quadro público da eleição.
+  A conferência NÃO revela em quem você votou.
+""")
+    eleicao = selecionar_eleicao("Selecione a eleição do seu voto")
+    if not eleicao:
+        return
+    comp = input("\n  Cole o recibo: ").strip()
+    if not comp:
+        return
+    try:
+        v = verificar_recibo(eleicao["id"], comp)
+    except Exception as e:
+        erro(str(e))
+        pausar()
+        return
+
+    if v["encontrado"] and v["prova_valida"]:
+        ok(v["mensagem"])
+        print(f"    Posição no quadro: {v['indice']} de {v['total_no_quadro']}")
+        print(f"    Cargo: {v.get('cargo') or '—'}")
+        print(f"    Registrado em: {v.get('registrado_em')}")
+        print(f"\n    Raiz Merkle: {v['merkle_raiz']}")
+        print("\n  A prova de inclusão Merkle confere: seu voto está na urna")
+        print("  e o quadro não foi alterado depois.")
+    else:
+        erro(v["mensagem"])
+    pausar()
+
+
 # ==================== ADMINISTRAÇÃO ====================
 
 def login_admin():
     limpar_tela()
     titulo("LOGIN DO ADMINISTRADOR")
-    print("\n  Padrão:  usuario = admin   /   senha = admin123\n")
 
-    usuario = input("  Usuário: ").strip()
-    senha = input("  Senha: ").strip()
+    usuario = input("\n  Usuário: ").strip()
+    try:
+        senha = getpass.getpass("  Senha: ")
+    except (EOFError, KeyboardInterrupt):
+        return
 
-    admin = verificar_admin(usuario, senha)
-    if admin:
-        menu_admin(admin)
-    else:
+    try:
+        admin = verificar_admin(usuario, senha)
+    except PermissionError as e:
+        erro(str(e))
+        pausar()
+        return
+
+    if not admin:
         erro("Usuário ou senha incorretos!")
         pausar()
+        return
+
+    if admin.get("trocar_senha"):
+        limpar_tela()
+        titulo("TROCA DE SENHA OBRIGATÓRIA")
+        print("\n  Este usuário ainda usa a senha inicial.")
+        print("  Defina uma senha própria para continuar.\n")
+        if not trocar_senha(admin, senha_atual_conhecida=senha):
+            aviso("Senha não alterada. Acesso interrompido.")
+            pausar()
+            return
+
+    menu_admin(admin)
 
 
 def menu_admin(admin: dict):
@@ -142,29 +222,30 @@ def menu_admin(admin: dict):
         limpar_tela()
         titulo(f"PAINEL ADMINISTRATIVO — {admin['nome']}")
         print("""
-  [1] Gerenciar Eleições
-  [2] Cadastrar Candidatos
-  [3] Cadastrar Eleitores
+  [1] Gerenciar Eleições (criar / editar / excluir)
+  [2] Gerenciar Candidatos
+  [3] Gerenciar Eleitores (inclui importar CSV)
   [4] Abrir / Fechar Votação
   [5] Ver Resultados
-  [6] Exportar Resultados (CSV / PDF)
+  [6] Exportar Resultados (CSV / PDF / quadro público)
   [7] Listar Eleitores (quem já votou)
   [8] Relatório de Votos (presença)
-  [9] Banco de Dados (backup / inspeção)
+  [9] Banco de Dados (backup / restauração / inspeção)
   [B] Auditoria de Votos / Log
+  [C] Administradores do sistema
   [A] Trocar minha senha
   [0] Voltar ao Menu Principal
 """)
         opcao = input("  Escolha uma opção: ").strip().upper()
 
         if opcao == "1":
-            gerenciar_eleicoes()
+            gerenciar_eleicoes(admin)
         elif opcao == "2":
-            menu_cadastrar_candidatos()
+            menu_gerenciar_candidatos(admin)
         elif opcao == "3":
-            menu_cadastrar_eleitores()
+            menu_gerenciar_eleitores(admin)
         elif opcao == "4":
-            menu_status_votacao()
+            menu_status_votacao(admin)
         elif opcao == "5":
             menu_resultados()
         elif opcao == "6":
@@ -177,6 +258,8 @@ def menu_admin(admin: dict):
             menu_banco_dados()
         elif opcao == "B":
             menu_auditoria()
+        elif opcao == "C":
+            menu_administradores(admin)
         elif opcao == "A":
             trocar_senha(admin)
         elif opcao == "0":
@@ -199,23 +282,23 @@ def selecionar_eleicao(mensagem: str = "Selecione a eleição") -> dict | None:
         pond = " [PONDERADO]" if e.get("voto_ponderado") else ""
         print(f"  [{e['id']}] {icon} {e['nome']} ({e['tipo']}) — {e['status'].upper()}{pond}")
 
-    try:
-        eid = int(input("\n  Digite o ID da eleição (0 para cancelar): ").strip())
-        if eid == 0:
-            return None
-        eleicao = obter_eleicao(eid)
-        if not eleicao:
-            erro("Eleição não encontrada.")
-            pausar()
-            return None
-        return eleicao
-    except ValueError:
-        erro("ID inválido.")
+    eid = ler_int("\n  Digite o ID da eleição (0 para cancelar): ")
+    if eid is None:
         pausar()
         return None
+    if eid == 0:
+        return None
+    eleicao = obter_eleicao(eid)
+    if not eleicao:
+        erro("Eleição não encontrada.")
+        pausar()
+        return None
+    return eleicao
 
 
-def gerenciar_eleicoes():
+# ---------- eleições ----------
+
+def gerenciar_eleicoes(admin: dict):
     while True:
         limpar_tela()
         titulo("GERENCIAR ELEIÇÕES")
@@ -226,8 +309,10 @@ def gerenciar_eleicoes():
             for e in eleicoes:
                 icon = {"preparacao": "🔧", "aberta": "🟢", "fechada": "🔴"}.get(e["status"], "?")
                 pond = " | Voto ponderado" if e.get("voto_ponderado") else ""
+                cargos = listar_cargos(e["id"])
                 print(f"  [{e['id']}] {icon} {e['nome']}")
                 print(f"       Tipo: {e['tipo'].capitalize()} | Status: {e['status'].upper()}{pond}")
+                print(f"       Cargos: {', '.join(cargos) if cargos else '(nenhum)'}")
                 if e["descricao"]:
                     print(f"       {e['descricao']}")
                 print()
@@ -235,11 +320,17 @@ def gerenciar_eleicoes():
             print("\n  Nenhuma eleição cadastrada ainda.\n")
 
         print("  [1] Criar nova eleição")
+        print("  [2] Editar uma eleição")
+        print("  [3] Excluir uma eleição")
         print("  [0] Voltar")
         opcao = input("\n  Opção: ").strip()
 
         if opcao == "1":
             criar_nova_eleicao()
+        elif opcao == "2":
+            editar_eleicao(admin)
+        elif opcao == "3":
+            remover_eleicao(admin)
         elif opcao == "0":
             return
 
@@ -260,9 +351,8 @@ def criar_nova_eleicao():
     print("  [1] Condomínio")
     print("  [2] Associação")
     print("  [3] Sindicato")
-    tipo_op = input("  Escolha: ").strip()
     tipos = {"1": "condominio", "2": "associacao", "3": "sindicato"}
-    tipo = tipos.get(tipo_op)
+    tipo = tipos.get(input("  Escolha: ").strip())
     if not tipo:
         erro("Tipo inválido!")
         pausar()
@@ -271,12 +361,13 @@ def criar_nova_eleicao():
     print("\n  Usar voto ponderado? (ex: fração ideal no condomínio)")
     print("  [1] Sim — cada eleitor tem um peso")
     print("  [2] Não — um eleitor = um voto")
-    pond_op = input("  Escolha [2]: ").strip() or "2"
-    voto_ponderado = pond_op == "1"
+    voto_ponderado = (input("  Escolha [2]: ").strip() or "2") == "1"
 
     try:
         eid = criar_eleicao(nome, descricao, tipo, voto_ponderado)
         ok(f"Eleição criada com sucesso! ID: {eid}")
+        print("  Próximo passo: cadastre os candidatos (cada cargo vira uma")
+        print("  cédula própria) e depois os eleitores.")
         if voto_ponderado:
             print("  Lembre-se de informar o peso de cada eleitor no cadastro.")
     except Exception as e:
@@ -284,84 +375,212 @@ def criar_nova_eleicao():
     pausar()
 
 
-def menu_cadastrar_candidatos():
-    eleicao = selecionar_eleicao("Selecione a eleição para cadastrar candidatos")
+def editar_eleicao(admin: dict):
+    eleicao = selecionar_eleicao("Selecione a eleição para editar")
     if not eleicao:
         return
+    limpar_tela()
+    titulo(f"EDITAR ELEIÇÃO — {eleicao['nome']}")
+    print("\n  Deixe em branco para manter o valor atual.\n")
 
-    if eleicao["status"] != "preparacao":
-        erro("Só é possível cadastrar candidatos em eleições em preparação.")
+    nome = input(f"  Nome [{eleicao['nome']}]: ").strip() or None
+    descricao = input(f"  Descrição [{eleicao['descricao'] or ''}]: ").strip()
+    descricao = descricao if descricao else None
+
+    pond_atual = "Sim" if eleicao["voto_ponderado"] else "Não"
+    pond_txt = input(f"  Voto ponderado? (s/n) [{pond_atual}]: ").strip().lower()
+    voto_ponderado = None
+    if pond_txt in ("s", "n"):
+        voto_ponderado = pond_txt == "s"
+
+    try:
+        if atualizar_eleicao(eleicao["id"], nome, descricao, voto_ponderado,
+                             autor=admin["usuario"]):
+            ok("Eleição atualizada.")
+        else:
+            aviso("Nada foi alterado.")
+    except ValueError as e:
+        erro(str(e))
+    pausar()
+
+
+def remover_eleicao(admin: dict):
+    eleicao = selecionar_eleicao("Selecione a eleição para EXCLUIR")
+    if not eleicao:
+        return
+    limpar_tela()
+    titulo("EXCLUIR ELEIÇÃO")
+    print(f"\n  Eleição: {eleicao['nome']}")
+    print(f"  Candidatos: {len(listar_candidatos(eleicao['id']))}")
+    print(f"  Eleitores:  {len(listar_eleitores(eleicao['id']))}")
+    print("\n  Isso apaga candidatos e eleitores dessa eleição.")
+    print("  Um backup do banco é feito automaticamente antes.")
+
+    confirmacao = input("\n  Digite o nome exato da eleição para confirmar: ").strip()
+    if confirmacao != eleicao["nome"]:
+        aviso("Nome não confere. Exclusão cancelada.")
         pausar()
         return
 
+    try:
+        excluir_eleicao(eleicao["id"], autor=admin["usuario"])
+        ok("Eleição excluída.")
+    except ValueError as e:
+        erro(str(e))
+    pausar()
+
+
+# ---------- candidatos ----------
+
+def menu_gerenciar_candidatos(admin: dict):
+    eleicao = selecionar_eleicao("Selecione a eleição para gerenciar candidatos")
+    if not eleicao:
+        return
+
     while True:
+        eleicao = obter_eleicao(eleicao["id"])
         limpar_tela()
         titulo(f"CANDIDATOS — {eleicao['nome']}")
+        print(f"  Status da eleição: {eleicao['status'].upper()}")
+        if eleicao["status"] != "preparacao":
+            aviso("Fora da preparação só é possível desativar candidatos.")
 
-        candidatos = listar_candidatos(eleicao["id"])
+        candidatos = listar_candidatos(eleicao["id"], apenas_ativos=False)
         if candidatos:
-            print("\n  Candidatos cadastrados:\n")
+            print("\n  Candidatos:\n")
             cargo_atual = None
             for c in candidatos:
                 if c["cargo"] != cargo_atual:
                     cargo_atual = c["cargo"]
                     print(f"  ── {cargo_atual} ──")
-                print(f"     Nº {c['numero']:02d} — {c['nome']}")
+                marca = "" if c["ativo"] else "  (INATIVO)"
+                print(f"     [{c['id']}] Nº {c['numero']:02d} — {c['nome']}{marca}")
                 if c.get("descricao"):
                     print(f"            {c['descricao']}")
         else:
             print("\n  Nenhum candidato cadastrado ainda.\n")
 
         print("\n  [1] Cadastrar novo candidato")
+        print("  [2] Editar candidato")
+        print("  [3] Excluir / desativar candidato")
         print("  [0] Voltar")
         opcao = input("\n  Opção: ").strip()
 
         if opcao == "1":
-            try:
-                numero = int(input("\n  Número do candidato: ").strip())
-                nome = input("  Nome completo: ").strip()
-                cargo = input("  Cargo pretendido (ex: Síndico, Conselheiro): ").strip()
-                descricao = input("  Descrição/proposta (opcional): ").strip()
-
-                if not nome or not cargo:
-                    erro("Nome e cargo são obrigatórios!")
-                    pausar()
-                    continue
-
-                cid = cadastrar_candidato(eleicao["id"], numero, nome, cargo, descricao)
-                ok(f"Candidato cadastrado! ID: {cid}")
-            except ValueError as e:
-                erro(str(e))
-            except Exception as e:
-                erro(f"Erro inesperado: {e}")
-            pausar()
+            _cadastrar_candidato_interativo(eleicao)
+        elif opcao == "2":
+            _editar_candidato_interativo(admin)
+        elif opcao == "3":
+            _excluir_candidato_interativo(admin)
         elif opcao == "0":
             return
 
 
-def menu_cadastrar_eleitores():
-    eleicao = selecionar_eleicao("Selecione a eleição para cadastrar eleitores")
-    if not eleicao:
+def _cadastrar_candidato_interativo(eleicao: dict):
+    if eleicao["status"] != "preparacao":
+        erro("Só é possível cadastrar candidatos em eleições em preparação.")
+        pausar()
         return
+    try:
+        numero = ler_int("\n  Número do candidato: ")
+        if numero is None:
+            pausar()
+            return
+        nome = input("  Nome completo: ").strip()
+        cargos_existentes = listar_cargos(eleicao["id"])
+        if cargos_existentes:
+            print(f"  Cargos já criados: {', '.join(cargos_existentes)}")
+        cargo = input("  Cargo pretendido (ex: Síndico, Conselheiro): ").strip()
+        descricao = input("  Descrição/proposta (opcional): ").strip()
 
-    if eleicao["status"] == "fechada":
-        erro("Não é possível cadastrar eleitores em eleição fechada.")
+        cid = cadastrar_candidato(eleicao["id"], numero, nome, cargo, descricao)
+        ok(f"Candidato cadastrado! ID: {cid}")
+    except ValueError as e:
+        erro(str(e))
+    except Exception as e:
+        erro(f"Erro inesperado: {e}")
+    pausar()
+
+
+def _editar_candidato_interativo(admin: dict):
+    cid = ler_int("\n  ID do candidato a editar: ")
+    if cid is None:
+        pausar()
+        return
+    cand = obter_candidato(cid)
+    if not cand:
+        erro("Candidato não encontrado.")
         pausar()
         return
 
+    print("\n  Deixe em branco para manter.\n")
+    numero = input(f"  Número [{cand['numero']}]: ").strip()
+    nome = input(f"  Nome [{cand['nome']}]: ").strip()
+    cargo = input(f"  Cargo [{cand['cargo']}]: ").strip()
+    descricao = input(f"  Descrição [{cand['descricao'] or ''}]: ").strip()
+
+    try:
+        alterado = atualizar_candidato(
+            cid,
+            numero=int(numero) if numero else None,
+            nome=nome or None,
+            cargo=cargo or None,
+            descricao=descricao if descricao else None,
+            autor=admin["usuario"],
+        )
+        ok("Candidato atualizado.") if alterado else aviso("Nada foi alterado.")
+    except ValueError as e:
+        erro(str(e))
+    pausar()
+
+
+def _excluir_candidato_interativo(admin: dict):
+    cid = ler_int("\n  ID do candidato a remover: ")
+    if cid is None:
+        pausar()
+        return
+    cand = obter_candidato(cid)
+    if not cand:
+        erro("Candidato não encontrado.")
+        pausar()
+        return
+    print(f"\n  {cand['nome']} (Nº {cand['numero']}, {cand['cargo']})")
+    if not perguntar_sim("Confirma a remoção?"):
+        return
+    try:
+        excluir_candidato(cid, autor=admin["usuario"])
+        ok("Candidato removido/desativado.")
+    except ValueError as e:
+        erro(str(e))
+    pausar()
+
+
+# ---------- eleitores ----------
+
+def menu_gerenciar_eleitores(admin: dict):
+    eleicao = selecionar_eleicao("Selecione a eleição para gerenciar eleitores")
+    if not eleicao:
+        return
+
     while True:
+        eleicao = obter_eleicao(eleicao["id"])
         limpar_tela()
         titulo(f"ELEITORES — {eleicao['nome']}")
 
         eleitores = listar_eleitores(eleicao["id"])
+        cargos = listar_cargos(eleicao["id"])
         print(f"\n  Total de eleitores: {len(eleitores)}")
+        print(f"  Cargos nesta eleição: {', '.join(cargos) if cargos else '(nenhum)'}")
         if eleicao.get("voto_ponderado"):
-            print("  (Esta eleição usa voto ponderado — informe o peso de cada um)\n")
-        else:
-            print()
+            print("  (Esta eleição usa voto ponderado — informe o peso de cada um)")
+        print()
 
         print("  [1] Cadastrar um eleitor")
-        print("  [2] Cadastrar vários de uma vez (lote)")
+        print("  [2] Cadastrar vários de uma vez (digitação em lote)")
+        print("  [3] Importar de arquivo CSV")
+        print("  [4] Gerar modelo de CSV")
+        print("  [5] Editar eleitor")
+        print("  [6] Excluir eleitor")
         print("  [0] Voltar")
         opcao = input("\n  Opção: ").strip()
 
@@ -369,6 +588,19 @@ def menu_cadastrar_eleitores():
             cadastrar_um_eleitor(eleicao)
         elif opcao == "2":
             cadastrar_lote_eleitores(eleicao)
+        elif opcao == "3":
+            importar_csv_eleitores(eleicao)
+        elif opcao == "4":
+            try:
+                caminho = modelo_csv_eleitores()
+                ok(f"Modelo gerado em:\n     {caminho}")
+            except Exception as e:
+                erro(str(e))
+            pausar()
+        elif opcao == "5":
+            _editar_eleitor_interativo(eleicao, admin)
+        elif opcao == "6":
+            _excluir_eleitor_interativo(eleicao, admin)
         elif opcao == "0":
             return
 
@@ -396,15 +628,10 @@ def cadastrar_um_eleitor(eleicao: dict):
             erro("Peso inválido. Usando 1.0")
             peso = 1.0
 
-    if not nome or not cpf:
-        erro("Nome e CPF são obrigatórios!")
-        pausar()
-        return
-
     try:
         eid = cadastrar_eleitor(eleicao["id"], nome, cpf, unidade=unidade, bloco=bloco, peso=peso)
         ok(f"Eleitor cadastrado! ID: {eid}")
-        print(f"  CPF: {cpf}")
+        print(f"  CPF: {formatar_cpf(cpf)}")
         print("  Na votação, o eleitor se identifica com este CPF.")
         if eleicao.get("voto_ponderado"):
             print(f"  Peso: {peso}")
@@ -443,7 +670,7 @@ def cadastrar_lote_eleitores(eleicao: dict):
         try:
             cadastrar_eleitor(eleicao["id"], nome, cpf, unidade=unidade, bloco=bloco, peso=peso)
             contador += 1
-            print(f"    ✓ {nome} (CPF {cpf})")
+            print(f"    ✓ {nome} (CPF {formatar_cpf(cpf)})")
         except ValueError as e:
             print(f"    ✗ {nome}: {e}")
 
@@ -451,14 +678,106 @@ def cadastrar_lote_eleitores(eleicao: dict):
     pausar()
 
 
-def menu_status_votacao():
+def importar_csv_eleitores(eleicao: dict):
+    print("\n  --- Importar eleitores de CSV ---")
+    print("  Colunas aceitas: nome; cpf; unidade; bloco; peso")
+    print("  (use a opção [4] para gerar um modelo)\n")
+    caminho = input("  Caminho do arquivo CSV: ").strip().strip('"')
+    if not caminho:
+        return
+    try:
+        rel = importar_eleitores_csv(eleicao["id"], caminho)
+    except (FileNotFoundError, ValueError) as e:
+        erro(str(e))
+        pausar()
+        return
+
+    ok(f"{rel['importados']} eleitor(es) importado(s).")
+    if rel["erros"]:
+        aviso(f"{rel['total_erros']} linha(s) com problema:")
+        for e in rel["erros"][:20]:
+            print(f"    linha {e['linha']} ({e['nome'] or '?'}): {e['erro']}")
+        if rel["total_erros"] > 20:
+            print(f"    ... e mais {rel['total_erros'] - 20}")
+    pausar()
+
+
+def _editar_eleitor_interativo(eleicao: dict, admin: dict):
+    eid = ler_int("\n  ID do eleitor a editar: ")
+    if eid is None:
+        pausar()
+        return
+    eleitor = obter_eleitor(eid)
+    if not eleitor or eleitor["eleicao_id"] != eleicao["id"]:
+        erro("Eleitor não encontrado nesta eleição.")
+        pausar()
+        return
+
+    print("\n  Deixe em branco para manter.")
+    print("  CPF e peso ficam travados depois que a pessoa vota.\n")
+    nome = input(f"  Nome [{eleitor['nome']}]: ").strip()
+    cpf = input(f"  CPF [{formatar_cpf(eleitor['documento'])}]: ").strip()
+    unidade = input(f"  Unidade [{eleitor['unidade'] or ''}]: ").strip()
+    bloco = input(f"  Bloco [{eleitor['bloco'] or ''}]: ").strip()
+    peso_txt = input(f"  Peso [{eleitor['peso']}]: ").strip()
+
+    peso = None
+    if peso_txt:
+        try:
+            peso = float(peso_txt.replace(",", "."))
+        except ValueError:
+            erro("Peso inválido.")
+            pausar()
+            return
+
+    try:
+        alterado = atualizar_eleitor(
+            eid,
+            nome=nome or None,
+            documento=cpf or None,
+            unidade=unidade if unidade else None,
+            bloco=bloco if bloco else None,
+            peso=peso,
+            autor=admin["usuario"],
+        )
+        ok("Eleitor atualizado.") if alterado else aviso("Nada foi alterado.")
+    except ValueError as e:
+        erro(str(e))
+    pausar()
+
+
+def _excluir_eleitor_interativo(eleicao: dict, admin: dict):
+    eid = ler_int("\n  ID do eleitor a excluir: ")
+    if eid is None:
+        pausar()
+        return
+    eleitor = obter_eleitor(eid)
+    if not eleitor or eleitor["eleicao_id"] != eleicao["id"]:
+        erro("Eleitor não encontrado nesta eleição.")
+        pausar()
+        return
+    print(f"\n  {eleitor['nome']} — CPF {formatar_cpf(eleitor['documento'])}")
+    if not perguntar_sim("Confirma a exclusão?"):
+        return
+    try:
+        excluir_eleitor(eid, autor=admin["usuario"])
+        ok("Eleitor excluído.")
+    except ValueError as e:
+        erro(str(e))
+    pausar()
+
+
+# ---------- status ----------
+
+def menu_status_votacao(admin: dict):
     eleicao = selecionar_eleicao("Selecione a eleição para alterar status")
     if not eleicao:
         return
 
     limpar_tela()
     titulo(f"STATUS DA ELEIÇÃO — {eleicao['nome']}")
-    print(f"\n  Status atual: {eleicao['status'].upper()}\n")
+    print(f"\n  Status atual: {eleicao['status'].upper()}")
+    print(f"  Cargos: {', '.join(listar_cargos(eleicao['id'])) or '(nenhum)'}\n")
 
     print("  [1] Colocar em PREPARAÇÃO")
     print("  [2] ABRIR votação")
@@ -474,6 +793,7 @@ def menu_status_votacao():
     if novo == "aberta":
         candidatos = listar_candidatos(eleicao["id"])
         eleitores = listar_eleitores(eleicao["id"])
+        cargos = listar_cargos(eleicao["id"])
         if not candidatos:
             erro("Não é possível abrir sem candidatos cadastrados!")
             pausar()
@@ -483,13 +803,16 @@ def menu_status_votacao():
             pausar()
             return
         print(f"\n  Candidatos: {len(candidatos)} | Eleitores: {len(eleitores)}")
-        conf = input("  Confirma abertura da votação? (s/N): ").strip().lower()
-        if conf != "s":
+        print(f"  Cargos: {', '.join(cargos)}")
+        print(f"  Cada eleitor emitirá {len(cargos)} voto(s).")
+        if not eleicao.get("contadores_homo"):
+            print("\n  Inicializando contadores homomórficos (pode levar alguns")
+            print("  segundos na primeira vez, por causa da geração da chave).")
+        if not perguntar_sim("Confirma abertura da votação?"):
             return
 
     if novo == "fechada":
-        conf = input("\n  Confirma FECHAMENTO da votação? (s/N): ").strip().lower()
-        if conf != "s":
+        if not perguntar_sim("Confirma FECHAMENTO da votação?"):
             return
 
     try:
@@ -498,13 +821,41 @@ def menu_status_votacao():
             try:
                 bk = fazer_backup(f"antes_{novo}")
                 print(f"\n  Backup automático: {os.path.basename(bk)}")
-            except Exception:
-                pass
-        alterar_status_eleicao(eleicao["id"], novo)
+            except Exception as e:
+                aviso(f"Backup não realizado: {e}")
+        alterar_status_eleicao(eleicao["id"], novo, autor=admin["usuario"])
         ok(f"Status alterado para: {novo.upper()}")
     except Exception as e:
         erro(str(e))
     pausar()
+
+
+# ---------- resultados ----------
+
+def _obter_resultados_ou_avisar(eleicao_id: int) -> dict | None:
+    """Apura em modo estrito; se falhar, explica e oferece o modo parcial."""
+    try:
+        return obter_resultados(eleicao_id)
+    except ErroApuracao as e:
+        erro(str(e))
+        print("\n  Votos que não puderam ser abertos:")
+        for f in e.detalhes[:10]:
+            print(f"    voto #{f.get('voto_id')} ({f.get('cargo')}): {f.get('erro')}")
+        if len(e.detalhes) > 10:
+            print(f"    ... e mais {len(e.detalhes) - 10}")
+        print("""
+  Causas comuns:
+    • O arquivo urna.key foi perdido, trocado ou é de outra urna
+    • O banco foi restaurado sem a chave correspondente
+    • Corrupção de dados
+
+  A apuração foi bloqueada de propósito: contar esses votos como nulos
+  produziria um resultado ERRADO e silencioso.
+""")
+        if perguntar_sim("Ver mesmo assim, ignorando os votos ilegíveis?"):
+            return obter_resultados(eleicao_id, estrito=False)
+        pausar()
+        return None
 
 
 def menu_resultados():
@@ -519,42 +870,45 @@ def menu_resultados():
         print("  Modo: VOTO PONDERADO")
     print()
 
-    resultados = obter_resultados(eleicao["id"])
+    resultados = _obter_resultados_ou_avisar(eleicao["id"])
+    if resultados is None:
+        return
 
     print("  ┌──────────────────────────────────────────────────────┐")
     print(f"  │  Eleitores aptos:            {resultados['total_eleitores']:>6}                 │")
-    print(f"  │  Compareceram:               {resultados['votaram']:>6}                 │")
+    print(f"  │  Compareceram (≥1 cargo):    {resultados['votaram']:>6}                 │")
+    print(f"  │  Votaram em todos os cargos: {resultados['concluiram_todos_cargos']:>6}                 │")
     print(f"  │  Abstenções:                 {resultados['abstencoes']:>6}                 │")
     print(f"  │  Votos computados:           {resultados['total_votos']:>6}                 │")
     if resultados["ponderado"]:
         print(f"  │  Peso total dos votos:       {resultados['total_peso']:>6.2f}                 │")
     print("  └──────────────────────────────────────────────────────┘\n")
 
+    ponderado = resultados["ponderado"]
     for cargo, lista in resultados["por_cargo"].items():
-        print(f"  ── {cargo.upper()} ──\n")
-        total_cargo = sum(c["peso_votos"] for c in lista) if resultados["ponderado"] else sum(c["votos"] for c in lista)
+        ag = resultados["agregado_cargo"].get(cargo, {})
+        total_cargo = ag.get("total_peso" if ponderado else "total_votos", 0)
+        print(f"  ── {cargo.upper()} ──  ({ag.get('total_votos', 0)} votos)\n")
         for i, c in enumerate(lista, 1):
-            valor = c["peso_votos"] if resultados["ponderado"] else c["votos"]
-            pct = (valor / total_cargo * 100) if total_cargo > 0 else 0
+            valor = c["peso_votos"] if ponderado else c["votos"]
+            pct = (valor / total_cargo * 100) if total_cargo else 0
             barra = "█" * int(pct / 2) + "░" * (50 - int(pct / 2))
             med = "🥇" if i == 1 else f"{i}º"
             print(f"  {med}  Nº {c['numero']:02d} — {c['nome']}")
-            if resultados["ponderado"]:
+            if ponderado:
                 print(f"      Votos: {c['votos']} | Peso: {c['peso_votos']:.2f} ({pct:.1f}%)")
             else:
                 print(f"      Votos: {c['votos']} ({pct:.1f}%)")
             print(f"      [{barra}]\n")
 
-    print(f"  Votos em BRANCO: {resultados['brancos']['qtd']}", end="")
-    if resultados["ponderado"]:
-        print(f" (peso {resultados['brancos']['peso']:.2f})")
-    else:
-        print()
-    print(f"  Votos NULOS:     {resultados['nulos']['qtd']}", end="")
-    if resultados["ponderado"]:
-        print(f" (peso {resultados['nulos']['peso']:.2f})")
-    else:
-        print()
+        b, n = ag.get("brancos", {}), ag.get("nulos", {})
+        linha = f"      BRANCO: {b.get('qtd', 0)}   NULO: {n.get('qtd', 0)}"
+        if ponderado:
+            linha += f"   (pesos {b.get('peso', 0):.2f} / {n.get('peso', 0):.2f})"
+        print(linha + "\n")
+
+    if resultados.get("falhas_decifra"):
+        aviso(f"{len(resultados['falhas_decifra'])} voto(s) ilegíveis foram IGNORADOS.")
 
     if eleicao["status"] != "fechada":
         aviso("A eleição ainda não foi fechada. Resultados parciais.")
@@ -563,31 +917,37 @@ def menu_resultados():
 
 
 def menu_exportar():
-    eleicao = selecionar_eleicao("Selecione a eleição para exportar resultados")
+    eleicao = selecionar_eleicao("Selecione a eleição para exportar")
     if not eleicao:
         return
 
     limpar_tela()
-    titulo(f"EXPORTAR RESULTADOS — {eleicao['nome']}")
+    titulo(f"EXPORTAR — {eleicao['nome']}")
     print("""
-  [1] Exportar para CSV (planilha)
-  [2] Exportar para PDF (boletim oficial)
-  [3] Exportar ambos
+  [1] Resultados em CSV (planilha)
+  [2] Resultados em PDF (boletim oficial)
+  [3] Ambos (CSV + PDF)
+  [4] Quadro público de compromissos (CSV, para afixar)
   [0] Cancelar
 """)
     opcao = input("  Opção: ").strip()
     if opcao == "0":
         return
+    if opcao not in ("1", "2", "3", "4"):
+        erro("Opção inválida.")
+        pausar()
+        return
 
     try:
         if opcao in ("1", "3"):
-            caminho = exportar_resultados_csv(eleicao["id"])
-            ok(f"CSV salvo em:\n     {caminho}")
+            ok(f"CSV salvo em:\n     {exportar_resultados_csv(eleicao['id'])}")
         if opcao in ("2", "3"):
-            caminho = exportar_resultados_pdf(eleicao["id"])
-            ok(f"PDF salvo em:\n     {caminho}")
-        if opcao not in ("1", "2", "3"):
-            erro("Opção inválida.")
+            ok(f"PDF salvo em:\n     {exportar_resultados_pdf(eleicao['id'])}")
+        if opcao == "4":
+            ok(f"Quadro salvo em:\n     {exportar_quadro_compromissos(eleicao['id'])}")
+    except ErroApuracao as e:
+        erro(str(e))
+        print("  Corrija a integridade antes de emitir o boletim.")
     except Exception as e:
         erro(f"Erro na exportação: {e}")
     pausar()
@@ -607,25 +967,32 @@ def menu_listar_eleitores():
         pausar()
         return
 
+    total_cargos = len(listar_cargos(eleicao["id"]))
     tem_peso = eleicao.get("voto_ponderado")
-    if tem_peso:
-        print(f"\n  {'ID':<5} {'Nome':<26} {'CPF':<15} {'Unid.':<8} {'Peso':>5}  Votou?")
-        print("  " + "─" * 78)
-    else:
-        print(f"\n  {'ID':<5} {'Nome':<28} {'CPF':<16} {'Unidade':<10} Votou?")
-        print("  " + "─" * 75)
+
+    print(f"\n  {'ID':<5} {'Nome':<26} {'CPF':<15} {'Unid.':<7} "
+          f"{'Peso':>5}  {'Cargos':<7} Situação")
+    print("  " + "─" * 88)
 
     for e in eleitores:
-        status = "✓ SIM" if e["ja_votou"] else "— NÃO"
-        un = (e["unidade"] or "—")[:7]
-        cpf_fmt = formatar_cpf(e["documento"])
-        if tem_peso:
-            print(f"  {e['id']:<5} {e['nome'][:25]:<26} {cpf_fmt:<15} {un:<8} {e['peso']:>5.2f}  {status}")
+        votados = e.get("cargos_votados", 0)
+        if votados == 0:
+            situacao = "— não votou"
+        elif total_cargos and votados >= total_cargos:
+            situacao = "✓ completo"
         else:
-            print(f"  {e['id']:<5} {e['nome'][:27]:<28} {cpf_fmt:<16} {un:<10} {status}")
+            situacao = "~ parcial"
+        un = (e["unidade"] or "—")[:6]
+        peso = f"{e['peso']:>5.2f}" if tem_peso else "    —"
+        print(f"  {e['id']:<5} {e['nome'][:25]:<26} {e['cpf_formatado']:<15} {un:<7} "
+              f"{peso}  {votados}/{total_cargos:<5} {situacao}")
 
-    votaram = sum(1 for e in eleitores if e["ja_votou"])
-    print(f"\n  Total: {len(eleitores)} | Votaram: {votaram} | Pendentes: {len(eleitores) - votaram}")
+    completos = sum(1 for e in eleitores
+                    if total_cargos and e.get("cargos_votados", 0) >= total_cargos)
+    parciais = sum(1 for e in eleitores
+                   if 0 < e.get("cargos_votados", 0) < total_cargos)
+    print(f"\n  Total: {len(eleitores)} | Completos: {completos} | "
+          f"Parciais: {parciais} | Pendentes: {len(eleitores) - completos - parciais}")
     pausar()
 
 
@@ -640,32 +1007,37 @@ def menu_relatorio_votos():
     print("  (Não revela em quem cada pessoa votou — sigilo preservado)\n")
 
     rel = relatorio_votos(eleicao["id"])
+    print(f"  Cargos:          {', '.join(rel['cargos']) or '—'}")
     print(f"  Total eleitores: {rel['total_eleitores']}")
-    print(f"  Já votaram:      {rel['qtd_votaram']}")
+    print(f"  Compareceram:    {rel['qtd_votaram']}")
+    print(f"  Votação parcial: {rel['qtd_parciais']}")
     print(f"  Pendentes:       {rel['qtd_pendentes']}")
     print(f"  Votos na urna:   {rel['total_votos_computados']}\n")
 
-    print(f"  {'STATUS':<10} {'NOME':<28} {'CPF':<16} {'UNID.':<8} {'DATA'}")
-    print("  " + "─" * 80)
+    print(f"  {'STATUS':<11} {'NOME':<26} {'CPF':<16} {'UNID.':<7} {'CARGOS':<7} {'DATA'}")
+    print("  " + "─" * 88)
     for e in rel["votaram"]:
-        un = (e.get("unidade") or "—")[:7]
+        un = (e.get("unidade") or "—")[:6]
         data = (e.get("data_voto") or "")[:19]
-        print(f"  {'✓ VOTOU':<10} {e['nome'][:27]:<28} {e['cpf_formatado']:<16} {un:<8} {data}")
+        marca = "✓ COMPLETO" if e["completo"] else "~ PARCIAL"
+        cargos = f"{e['cargos_votados_qtd']}/{e['total_cargos']}"
+        print(f"  {marca:<11} {e['nome'][:25]:<26} {e['cpf_formatado']:<16} {un:<7} {cargos:<7} {data}")
     for e in rel["pendentes"]:
-        un = (e.get("unidade") or "—")[:7]
-        print(f"  {'— PEND.':<10} {e['nome'][:27]:<28} {e['cpf_formatado']:<16} {un:<8}")
+        un = (e.get("unidade") or "—")[:6]
+        print(f"  {'— PENDENTE':<11} {e['nome'][:25]:<26} {e['cpf_formatado']:<16} {un:<7} "
+              f"{'0/' + str(e['total_cargos']):<7}")
 
     print("\n  [1] Exportar este relatório em CSV")
     print("  [0] Voltar")
-    op = input("\n  Opção: ").strip()
-    if op == "1":
+    if input("\n  Opção: ").strip() == "1":
         try:
-            caminho = exportar_relatorio_votos_csv(eleicao["id"])
-            ok(f"CSV salvo em:\n     {caminho}")
+            ok(f"CSV salvo em:\n     {exportar_relatorio_votos_csv(eleicao['id'])}")
         except Exception as e:
             erro(str(e))
         pausar()
 
+
+# ---------- auditoria ----------
 
 def menu_auditoria():
     """Exploração do log de auditoria e integridade dos votos."""
@@ -674,7 +1046,7 @@ def menu_auditoria():
         titulo("AUDITORIA DE VOTOS / LOG DO SISTEMA")
         print("""
   O log registra ações do sistema. Nos votos, registra que um voto
-  ocorreu (tipo e peso), SEM identificar o eleitor nem o candidato
+  ocorreu (cargo e peso), SEM identificar o eleitor nem o candidato
   escolhido — o sigilo é preservado.
 
   [1] Ver log recente (últimos 50)
@@ -705,14 +1077,19 @@ def menu_auditoria():
                 from homo_voto import info_homo
                 info = info_homo()
                 print(f"\n  Esquema: {info['esquema']}")
-                print(f"  Chave: {'presente' if info['chave_existe'] else 'será gerada'} ({info.get('n_bits') or '?'} bits)")
+                print(f"  Chave: {'presente' if info['chave_existe'] else 'será gerada'} "
+                      f"({info.get('n_bits') or '?'} bits)")
+                if info.get("aviso"):
+                    aviso(info["aviso"])
                 rel = obter_resultados_homo(eleicao["id"])
                 print("\n  Totais (decifrados só no agregado):\n")
-                for c in rel["candidatos"]:
-                    print(f"  Nº {c['numero']:02d} {c['nome']}: peso {c['peso_votos']:.2f}")
-                print(f"\n  Brancos (peso): {rel['brancos_peso']:.2f}")
-                print(f"  Nulos (peso):   {rel['nulos_peso']:.2f}")
-                print("\n  Os votos individuais permanecem cifrados; só a soma foi aberta.")
+                for cargo, dados in rel["por_cargo"].items():
+                    print(f"  ── {cargo} ──")
+                    for c in dados["candidatos"]:
+                        print(f"     Nº {c['numero']:02d} {c['nome']}: peso {c['peso_votos']:.2f}")
+                    print(f"     Brancos: {dados['brancos_peso']:.2f} | "
+                          f"Nulos: {dados['nulos_peso']:.2f}\n")
+                print("  Os votos individuais permanecem cifrados; só a soma foi aberta.")
             except Exception as e:
                 erro(str(e))
             pausar()
@@ -755,8 +1132,7 @@ def menu_auditoria():
             continue
 
         if op == "1":
-            regs = consultar_auditoria(limite=50)
-            _exibir_log(regs)
+            _exibir_log(consultar_auditoria(limite=50))
             pausar()
 
         elif op == "2":
@@ -783,10 +1159,12 @@ def menu_auditoria():
             print(f"\n  Total de compromissos: {q['total']}")
             print(f"  Raiz Merkle: {q['merkle_raiz']}\n")
             for c in q["compromissos"][:20]:
-                print(f"  voto #{c['voto_id']}: {c['compromisso'][:32]}…")
+                print(f"  voto #{c['voto_id']} [{(c['cargo'] or '—')[:12]:<12}] "
+                      f"{c['compromisso'][:32]}…")
             if q["total"] > 20:
                 print(f"  ... e mais {q['total'] - 20}")
             print("\n  Os compromissos são públicos; o conteúdo do voto permanece secreto.")
+            print("  Use [6] Exportar no menu de exportação para afixar o quadro.")
             pausar()
 
         elif op == "8":
@@ -802,6 +1180,8 @@ def menu_auditoria():
                 erro(f"Falhas: {len(rel.get('erros') or [])}")
                 for e in (rel.get("erros") or [])[:10]:
                     print(f"    {e}")
+                for f in (rel.get("falhas_decifra") or [])[:10]:
+                    print(f"    voto #{f['voto_id']}: {f['erro']}")
             print(f"\n  Votos verificados: {rel.get('compromissos_validos')}/{rel.get('total_votos')}")
             print(f"  Peso total: {rel.get('peso_total')}")
             print(f"  Brancos: {rel.get('brancos')} | Nulos: {rel.get('nulos')}")
@@ -821,21 +1201,22 @@ def menu_auditoria():
             dados = auditoria_consistencia_votos(eleicao["id"])
 
             print(f"""
-  Eleitores que já votaram:     {dados['eleitores_votaram']}
-  Votos na urna:                {dados['votos_urna']}
+  Registros de participação:        {dados['participacoes']}
+  Votos na urna:                    {dados['votos_urna']}
   Eventos no log (VOTO_REGISTRADO): {dados['eventos_log']}
+  Eleitores que votaram em tudo:    {dados['eleitores_completos']}
 """)
             if dados["consistente"]:
                 ok("Integridade OK — os três números batem.")
             else:
                 erro("Divergência detectada!")
-                print(f"  eleitores − urna = {dados['divergencia']['eleitores_vs_urna']}")
-                print(f"  urna − log       = {dados['divergencia']['urna_vs_log']}")
+                print(f"  participação − urna = {dados['divergencia']['participacao_vs_urna']}")
+                print(f"  urna − log          = {dados['divergencia']['urna_vs_log']}")
 
-            if dados["por_tipo"]:
-                print("\n  Votos por tipo na urna:")
-                for tipo, info in dados["por_tipo"].items():
-                    print(f"    {tipo}: {info['qtd']} (peso {info['peso']:.2f})")
+            if dados["por_cargo"]:
+                print("\n  Votos por cargo na urna:")
+                for cargo, info in dados["por_cargo"].items():
+                    print(f"    {cargo}: {info['qtd']} (peso {info['peso']:.2f})")
 
             if dados["timeline"]:
                 print(f"\n  Timeline de votos no log ({len(dados['timeline'])}):\n")
@@ -860,9 +1241,10 @@ def menu_auditoria():
                 aviso("Nenhum registro para exportar.")
                 pausar()
                 continue
+            pasta = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "relatorios")
+            os.makedirs(pasta, exist_ok=True)
             caminho = os.path.join(
-                os.path.dirname(os.path.abspath(DB_PATH)),
-                f"auditoria_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                pasta, f"auditoria_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             )
             try:
                 exportar_auditoria_csv(caminho, regs)
@@ -890,8 +1272,10 @@ def _exibir_log(regs: list):
         print(f"  {r['id']:<6} {data:<22} {acao:<20} {det}")
 
 
+# ---------- banco ----------
+
 def menu_banco_dados():
-    """Backup e inspeção do banco SQLite."""
+    """Backup, restauração e inspeção do banco SQLite."""
     while True:
         limpar_tela()
         titulo("BANCO DE DADOS SQLite")
@@ -912,13 +1296,24 @@ def menu_banco_dados():
             print(f"\n  Criptografia: {cripto['algoritmo']}")
             print(f"  Arquivo da chave: {cripto['arquivo_chave']}")
             print(f"  Chave presente: {'Sim' if cripto['chave_existe'] else 'Não (criada no 1º voto)'}")
+            if not cripto["chave_existe"]:
+                print("  ⚠ Sem esse arquivo os votos já gravados NÃO podem ser apurados.")
+        except Exception:
+            pass
+
+        try:
+            from homo_voto import info_homo
+            h = info_homo()
+            if h.get("aviso"):
+                print(f"\n  ⚠ Paillier: {h['aviso']}")
         except Exception:
             pass
 
         print("""
   [1] Fazer backup agora
   [2] Listar backups
-  [3] Ver colunas de cada tabela
+  [3] Restaurar um backup
+  [4] Ver colunas de cada tabela
   [0] Voltar
 """)
         op = input("  Opção: ").strip()
@@ -927,22 +1322,16 @@ def menu_banco_dados():
             return
         if op == "1":
             try:
-                caminho = fazer_backup("manual")
-                ok(f"Backup criado:\n     {caminho}")
+                ok(f"Backup criado:\n     {fazer_backup('manual')}")
             except Exception as e:
                 erro(str(e))
             pausar()
         elif op == "2":
-            backups = listar_backups()
-            if not backups:
-                aviso("Nenhum backup encontrado.")
-            else:
-                print(f"\n  {'ARQUIVO':<45} {'KB':>8}  DATA")
-                print("  " + "─" * 70)
-                for b in backups:
-                    print(f"  {b['nome']:<45} {b['tamanho_kb']:>8}  {b['modificado']}")
+            _listar_backups()
             pausar()
         elif op == "3":
+            _restaurar_backup_interativo()
+        elif op == "4":
             print()
             for t in info["tabelas"]:
                 print(f"  {t['nome']}: {', '.join(t['colunas'])}")
@@ -952,29 +1341,152 @@ def menu_banco_dados():
             pausar()
 
 
-def trocar_senha(admin: dict):
+def _listar_backups() -> list[dict]:
+    backups = listar_backups()
+    if not backups:
+        aviso("Nenhum backup encontrado.")
+        return []
+    print(f"\n  {'#':<4} {'ARQUIVO':<45} {'KB':>8}  DATA")
+    print("  " + "─" * 76)
+    for i, b in enumerate(backups, 1):
+        print(f"  {i:<4} {b['nome']:<45} {b['tamanho_kb']:>8}  {b['modificado']}")
+    return backups
+
+
+def _restaurar_backup_interativo():
     limpar_tela()
-    titulo("TROCAR SENHA")
-    print(f"\n  Usuário: {admin['usuario']}\n")
+    titulo("RESTAURAR BACKUP")
+    print("""
+  A restauração SUBSTITUI o banco atual pelo backup escolhido.
+  O estado atual é salvo automaticamente antes (antes_restaurar).
 
-    senha_atual = input("  Senha atual: ").strip()
-    senha_nova = input("  Nova senha: ").strip()
-    senha_conf = input("  Confirme a nova senha: ").strip()
-
-    if not senha_nova:
-        erro("A nova senha não pode ser vazia.")
+  ⚠ Votos registrados depois do backup serão PERDIDOS.
+  ⚠ A chave urna.key NÃO faz parte do backup: se ela mudou desde
+    então, os votos restaurados não poderão ser decifrados.
+""")
+    backups = _listar_backups()
+    if not backups:
         pausar()
         return
+
+    n = ler_int("\n  Número do backup a restaurar (0 = cancelar): ")
+    if n is None or n == 0:
+        pausar()
+        return
+    if not 1 <= n <= len(backups):
+        erro("Número fora da lista.")
+        pausar()
+        return
+
+    escolhido = backups[n - 1]
+    print(f"\n  Selecionado: {escolhido['nome']} ({escolhido['modificado']})")
+    if input('  Digite "RESTAURAR" para confirmar: ').strip() != "RESTAURAR":
+        aviso("Restauração cancelada.")
+        pausar()
+        return
+
+    try:
+        destino = restaurar_backup(escolhido["caminho"])
+        inicializar_banco()
+        ok(f"Banco restaurado em:\n     {destino}")
+    except Exception as e:
+        erro(str(e))
+    pausar()
+
+
+# ---------- administradores ----------
+
+def menu_administradores(admin: dict):
+    while True:
+        limpar_tela()
+        titulo("ADMINISTRADORES DO SISTEMA")
+        admins = listar_admins()
+        print(f"\n  {'ID':<5} {'USUÁRIO':<18} {'NOME':<26} {'ATIVO':<7} SENHA INICIAL")
+        print("  " + "─" * 76)
+        for a in admins:
+            print(f"  {a['id']:<5} {a['usuario']:<18} {a['nome'][:25]:<26} "
+                  f"{'sim' if a['ativo'] else 'não':<7} {'sim' if a['trocar_senha'] else 'não'}")
+
+        print("""
+  [1] Criar administrador
+  [2] Redefinir senha de um administrador
+  [3] Desativar administrador
+  [0] Voltar
+""")
+        op = input("  Opção: ").strip()
+
+        if op == "0":
+            return
+        if op == "1":
+            usuario = input("\n  Novo usuário: ").strip()
+            nome = input("  Nome completo: ").strip()
+            senha = getpass.getpass("  Senha inicial (mín. 8 caracteres): ")
+            try:
+                criar_admin(usuario, senha, nome, autor=admin["usuario"])
+                ok(f"Administrador '{usuario}' criado. Ele deverá trocar a senha no 1º acesso.")
+            except ValueError as e:
+                erro(str(e))
+            pausar()
+        elif op == "2":
+            usuario = input("\n  Usuário: ").strip()
+            senha = getpass.getpass("  Nova senha (mín. 8 caracteres): ")
+            try:
+                if redefinir_senha_admin(usuario, senha, autor=admin["usuario"]):
+                    ok("Senha redefinida. O usuário trocará no próximo acesso.")
+                else:
+                    erro("Usuário não encontrado ou inativo.")
+            except ValueError as e:
+                erro(str(e))
+            pausar()
+        elif op == "3":
+            usuario = input("\n  Usuário a desativar: ").strip()
+            if usuario == admin["usuario"]:
+                erro("Você não pode desativar a si mesmo.")
+                pausar()
+                continue
+            if not perguntar_sim(f"Confirma desativar '{usuario}'?"):
+                continue
+            try:
+                if desativar_admin(usuario, autor=admin["usuario"]):
+                    ok("Administrador desativado.")
+                else:
+                    erro("Usuário não encontrado ou já inativo.")
+            except ValueError as e:
+                erro(str(e))
+            pausar()
+
+
+def trocar_senha(admin: dict, senha_atual_conhecida: str | None = None) -> bool:
+    if senha_atual_conhecida is None:
+        limpar_tela()
+        titulo("TROCAR SENHA")
+        print(f"\n  Usuário: {admin['usuario']}\n")
+        senha_atual = getpass.getpass("  Senha atual: ")
+    else:
+        senha_atual = senha_atual_conhecida
+
+    senha_nova = getpass.getpass("  Nova senha (mín. 8 caracteres): ")
+    senha_conf = getpass.getpass("  Confirme a nova senha: ")
+
     if senha_nova != senha_conf:
         erro("As senhas não coincidem.")
         pausar()
-        return
+        return False
 
-    if alterar_senha_admin(admin["usuario"], senha_atual, senha_nova):
+    try:
+        sucesso = alterar_senha_admin(admin["usuario"], senha_atual, senha_nova)
+    except ValueError as e:
+        erro(str(e))
+        pausar()
+        return False
+
+    if sucesso:
+        admin["trocar_senha"] = False
         ok("Senha alterada com sucesso!")
     else:
         erro("Senha atual incorreta.")
     pausar()
+    return sucesso
 
 
 # ==================== ÁREA DE VOTAÇÃO ====================
@@ -993,26 +1505,27 @@ def area_votacao():
     print("\n  Eleições disponíveis:\n")
     for e in eleicoes_abertas:
         pond = " [Ponderado]" if e.get("voto_ponderado") else ""
+        cargos = listar_cargos(e["id"])
         print(f"  [{e['id']}] {e['nome']} ({e['tipo'].capitalize()}){pond}")
+        print(f"       Cargos: {', '.join(cargos)}")
 
-    try:
-        eid = int(input("\n  Digite o ID da eleição (0 para cancelar): ").strip())
-        if eid == 0:
-            return
-        eleicao = obter_eleicao(eid)
-        if not eleicao or eleicao["status"] != "aberta":
-            erro("Eleição inválida ou não está aberta.")
-            pausar()
-            return
-    except ValueError:
-        erro("ID inválido.")
+    eid = ler_int("\n  Digite o ID da eleição (0 para cancelar): ")
+    if eid is None:
+        pausar()
+        return
+    if eid == 0:
+        return
+
+    eleicao = obter_eleicao(eid)
+    if not eleicao or eleicao["status"] != "aberta":
+        erro("Eleição inválida ou não está aberta.")
         pausar()
         return
 
     limpar_tela()
     titulo(f"VOTAÇÃO — {eleicao['nome']}")
     print("\n  Identifique-se com seu CPF.")
-    print("  (O sistema controla quem já votou pelo CPF)\n")
+    print("  (O sistema controla quem já votou, cargo a cargo)\n")
 
     cpf = input("  CPF: ").strip()
     eleitor = autenticar_eleitor(eleicao["id"], cpf)
@@ -1022,19 +1535,65 @@ def area_votacao():
         pausar()
         return
 
-    if eleitor["ja_votou"]:
+    pendentes = eleitor["cargos_pendentes"]
+    if not pendentes:
         print(f"\n  Atenção, {eleitor['nome']}!")
-        print(f"  O CPF {formatar_cpf(eleitor['documento'])} já registrou voto nesta eleição.")
-        print("  Cada CPF pode votar apenas uma vez.")
+        print(f"  O CPF {formatar_cpf(eleitor['documento'])} já votou em todos")
+        print(f"  os cargos desta eleição: {', '.join(eleitor['cargos_votados'])}.")
         pausar()
         return
 
-    realizar_voto(eleicao, eleitor)
+    if eleitor["cargos_votados"]:
+        print(f"\n  Você já votou em: {', '.join(eleitor['cargos_votados'])}")
+        print(f"  Faltam: {', '.join(pendentes)}")
+        pausar()
+
+    realizar_votacao(eleicao, eleitor, pendentes)
 
 
-def realizar_voto(eleicao: dict, eleitor: dict):
-    candidatos = listar_candidatos(eleicao["id"])
-    cargos = listar_cargos(eleicao["id"])
+def realizar_votacao(eleicao: dict, eleitor: dict, pendentes: list[str]):
+    """Conduz o eleitor por um voto em cada cargo pendente."""
+    recibos: list[tuple[str, str]] = []
+
+    for indice, cargo in enumerate(pendentes, 1):
+        resultado = votar_um_cargo(eleicao, eleitor, cargo, indice, len(pendentes))
+        if resultado is None:  # cancelou
+            break
+        recibos.append(resultado)
+
+    limpar_tela()
+    if not recibos:
+        print("\n  Votação encerrada sem registrar votos.")
+        pausar()
+        return
+
+    print("""
+  ╔══════════════════════════════════════════════════╗
+  ║              VOTO(S) REGISTRADO(S)               ║
+  ║        (cifrado + compromisso criptográfico)     ║
+  ╚══════════════════════════════════════════════════╝
+""")
+    print("  Seus recibos — guarde para conferência:\n")
+    for cargo, comp in recibos:
+        print(f"  {cargo}:")
+        print(f"    {comp}\n")
+
+    faltaram = [c for c in pendentes if c not in [r[0] for r in recibos]]
+    if faltaram:
+        aviso(f"Você ainda NÃO votou para: {', '.join(faltaram)}")
+        print("  Pode retornar à Área de Votação para concluir.")
+    else:
+        print("  Você votou em todos os cargos. Obrigado!")
+
+    print("\n  Com esses códigos você confere, no menu principal [4],")
+    print("  se seus votos entraram no quadro público — sem revelar a escolha.")
+    pausar()
+
+
+def votar_um_cargo(eleicao: dict, eleitor: dict, cargo: str,
+                   indice: int, total: int) -> tuple[str, str] | None:
+    """Mostra a cédula de um cargo e registra o voto. None = cancelado."""
+    candidatos = listar_candidatos(eleicao["id"], cargo=cargo)
 
     while True:
         limpar_tela()
@@ -1044,14 +1603,9 @@ def realizar_voto(eleicao: dict, eleitor: dict):
             print(f"  Unidade: {eleitor['unidade']} {eleitor.get('bloco') or ''}")
         if eleicao.get("voto_ponderado"):
             print(f"  Peso do seu voto: {eleitor.get('peso', 1.0)}")
-        print()
+        print(f"\n  ══ CÉDULA {indice} de {total} — {cargo.upper()} ══\n")
 
-        # Mostra candidatos agrupados por cargo
-        cargo_atual = None
         for c in candidatos:
-            if c["cargo"] != cargo_atual:
-                cargo_atual = c["cargo"]
-                print(f"  ── {cargo_atual} ──")
             print(f"  Nº {c['numero']:02d}  —  {c['nome']}")
             if c.get("descricao"):
                 print(f"           {c['descricao']}")
@@ -1060,40 +1614,60 @@ def realizar_voto(eleicao: dict, eleitor: dict):
         print("  ─────────────────────────────────────")
         print("  Digite o NÚMERO do candidato")
         print("  Ou digite BRANCO ou NULO")
-        print("  Ou digite 0 para cancelar\n")
+        print("  Ou digite 0 para cancelar a votação\n")
 
         escolha = input("  Seu voto: ").strip().upper()
 
         if escolha == "0":
             print("\n  Votação cancelada.")
             pausar()
-            return
+            return None
 
+        candidato = None
         if escolha == "BRANCO":
-            confirmar_voto(eleicao, eleitor, "branco")
-            return
-
-        if escolha == "NULO":
-            confirmar_voto(eleicao, eleitor, "nulo")
-            return
-
-        try:
-            numero = int(escolha)
-            candidato = obter_candidato_por_numero(eleicao["id"], numero)
-            if not candidato:
-                erro(f"Número {numero} não corresponde a nenhum candidato.")
+            tipo = "branco"
+        elif escolha == "NULO":
+            tipo = "nulo"
+        else:
+            try:
+                numero = int(escolha)
+            except ValueError:
+                erro("Entrada inválida. Digite o número, BRANCO, NULO ou 0.")
                 pausar()
                 continue
-            confirmar_voto(eleicao, eleitor, "candidato", candidato)
-            return
-        except ValueError:
-            erro("Entrada inválida. Digite o número, BRANCO, NULO ou 0.")
+            candidato = obter_candidato_por_numero(eleicao["id"], numero, cargo=cargo)
+            if not candidato:
+                erro(f"O número {numero} não é candidato a {cargo}.")
+                pausar()
+                continue
+            tipo = "candidato"
+
+        if not confirmar_voto(eleicao, eleitor, cargo, tipo, candidato):
+            continue  # volta para a mesma cédula
+
+        try:
+            voto_id = registrar_voto(
+                eleicao["id"], eleitor["id"], cargo, tipo,
+                candidato["id"] if candidato else None,
+            )
+        except ValueError as e:
+            erro(str(e))
             pausar()
+            return None
+        except Exception as e:
+            erro(f"Erro ao registrar voto: {e}")
+            pausar()
+            return None
+
+        recibo = obter_recibo_voto(voto_id) or {}
+        return (cargo, recibo.get("compromisso", "—"))
 
 
-def confirmar_voto(eleicao: dict, eleitor: dict, tipo: str, candidato: dict | None = None):
+def confirmar_voto(eleicao: dict, eleitor: dict, cargo: str,
+                   tipo: str, candidato: dict | None) -> bool:
+    """Tela de confirmação. True = confirmado, False = corrigir."""
     limpar_tela()
-    titulo("CONFIRMAÇÃO DO VOTO")
+    titulo(f"CONFIRMAÇÃO DO VOTO — {cargo.upper()}")
 
     print("\n  ╔══════════════════════════════════════╗")
     if tipo == "candidato" and candidato:
@@ -1116,39 +1690,7 @@ def confirmar_voto(eleicao: dict, eleitor: dict, tipo: str, candidato: dict | No
     print("\n  Confirma este voto?")
     print("  [1] SIM, confirmar")
     print("  [2] NÃO, corrigir")
-    opcao = input("\n  Opção: ").strip()
-
-    if opcao != "1":
-        realizar_voto(eleicao, eleitor)
-        return
-
-    try:
-        peso = float(eleitor.get("peso") or 1.0)
-        if tipo == "candidato":
-            voto_id = registrar_voto(eleicao["id"], "candidato", candidato["id"], peso)
-        else:
-            voto_id = registrar_voto(eleicao["id"], tipo, peso=peso)
-
-        marcar_como_votou(eleitor["id"])
-        recibo = obter_recibo_voto(voto_id)
-
-        limpar_tela()
-        print("""
-  ╔══════════════════════════════════════════════════╗
-  ║              VOTO REGISTRADO                     ║
-  ║         (cifrado + compromisso criptográfico)    ║
-  ╚══════════════════════════════════════════════════╝
-""")
-        if recibo and recibo.get("compromisso"):
-            print("  Seu recibo (compromisso) — guarde para conferência:")
-            print(f"\n  {recibo['compromisso']}\n")
-            print("  Com este código você pode verificar se o voto")
-            print("  entrou no quadro público, sem revelar sua escolha.")
-        print("\n  Obrigado por votar!")
-        pausar()
-    except Exception as e:
-        erro(f"Erro ao registrar voto: {e}")
-        pausar()
+    return input("\n  Opção: ").strip() == "1"
 
 
 # ==================== INICIALIZAÇÃO ====================

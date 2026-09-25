@@ -1,0 +1,10 @@
+# Urna Eletrônica — dependências
+
+# Criptografia dos votos em repouso (Fernet: AES-128-CBC + HMAC-SHA256)
+cryptography>=42.0.0
+
+# Geração do boletim de resultados em PDF
+reportlab>=4.0.0
+
+# Tudo o mais (SQLite, HTTP, Paillier, Schnorr, Merkle) usa só a
+# biblioteca padrão do Python 3.10+.

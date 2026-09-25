@@ -170,7 +170,15 @@ def gerar_chaves(bits: int = 512) -> tuple[PaillierPublicKey, PaillierPrivateKey
 # Persistência das chaves da urna
 # ---------------------------------------------------------------------------
 
-_KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "urna_paillier.json")
+_KEY_PATH = os.environ.get(
+    "URNA_PAILLIER",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "urna_paillier.json"),
+)
+
+# Tamanho de n para chaves NOVAS. 2048 bits é o mínimo aceitável fora de demo;
+# use URNA_PAILLIER_BITS=512 apenas para estudo/testes rápidos.
+BITS_PADRAO = int(os.environ.get("URNA_PAILLIER_BITS", "2048"))
+BITS_MINIMO_SEGURO = 2048
 
 
 def salvar_chaves(pub: PaillierPublicKey, priv: PaillierPrivateKey, caminho: str | None = None) -> str:
@@ -196,24 +204,39 @@ def carregar_chaves(caminho: str | None = None) -> tuple[PaillierPublicKey, Pail
     return pub, priv
 
 
-def carregar_ou_gerar(bits: int = 512) -> tuple[PaillierPublicKey, PaillierPrivateKey]:
+def carregar_ou_gerar(bits: int | None = None) -> tuple[PaillierPublicKey, PaillierPrivateKey]:
+    """
+    Carrega as chaves da urna ou gera um par novo.
+    Chaves já existentes são mantidas como estão (trocá-las inutilizaria os
+    contadores homomórficos já acumulados numa eleição em andamento).
+    """
     par = carregar_chaves()
     if par:
         return par
-    pub, priv = gerar_chaves(bits)
+    pub, priv = gerar_chaves(bits or BITS_PADRAO)
     salvar_chaves(pub, priv)
     return pub, priv
 
 
 def info_homo() -> dict[str, Any]:
     par = carregar_chaves()
-    return {
+    n_bits = par[0].n.bit_length() if par else None
+    info: dict[str, Any] = {
         "esquema": "Paillier (aditivo)",
         "propriedade": "Dec(Enc(a)*Enc(b)) = a+b",
         "chave_existe": par is not None,
         "arquivo": os.path.abspath(_KEY_PATH),
-        "n_bits": par[0].n.bit_length() if par else None,
+        "n_bits": n_bits,
+        "bits_novas_chaves": BITS_PADRAO,
+        "segura": bool(n_bits and n_bits >= BITS_MINIMO_SEGURO),
     }
+    if n_bits and n_bits < BITS_MINIMO_SEGURO:
+        info["aviso"] = (
+            f"A chave atual tem {n_bits} bits — tamanho de demonstração. "
+            f"Para uso real gere uma chave nova com pelo menos {BITS_MINIMO_SEGURO} bits "
+            f"(apague {os.path.basename(_KEY_PATH)} ANTES de abrir a eleição)."
+        )
+    return info
 
 
 # ---------------------------------------------------------------------------

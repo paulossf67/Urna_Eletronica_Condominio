@@ -1,0 +1,65 @@
+# ─── SEGREDOS E DADOS DA URNA ───────────────────────────────
+# NUNCA versione estes arquivos: eles abrem os votos.
+urna.key
+urna_paillier.json
+urna_schnorr.json
+urna_remoto.secret
+*.secret
+*.key
+
+# Banco de dados e seus arquivos auxiliares
+urna.db
+urna.db-wal
+urna.db-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Backups e saídas
+backups/
+relatorios/
+urna.log
+*.log
+resultados_*.csv
+resultados_*.pdf
+relatorio_votos_*.csv
+auditoria_*.csv
+quadro_compromissos_*.csv
+modelo_eleitores.csv
+
+# ─── PYTHON ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+ENV/
+
+# Ferramentas
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ─── EDITORES / SO ──────────────────────────────────────────
+.vscode/*
+!.vscode/settings.json
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ─── RESÍDUOS ───────────────────────────────────────────────
+*.zip

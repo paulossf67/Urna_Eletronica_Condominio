@@ -1,0 +1,26 @@
+[project]
+name = "urna-eletronica-condominio"
+version = "4.0.0"
+description = "Urna eletrônica sigilosa e verificável para condomínios, associações e sindicatos"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "cryptography>=42.0.0",
+    "reportlab>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
